@@ -1,0 +1,34 @@
+# Dependências
+node_modules/
+.npm
+
+# Build
+dist/
+dist-ssr/
+
+# Variáveis de ambiente (NÃO commitar credenciais!)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Capacitor
+android/.gradle/
+android/app/build/
+ios/Pods/
