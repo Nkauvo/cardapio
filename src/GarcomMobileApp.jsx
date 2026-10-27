@@ -1,20 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Camera, CameraResultType, CameraSource } from '@capacitor/camera';
+import { Capacitor } from '@capacitor/core';
 import { supabase } from './supabaseClient';
+
+// Detecta se está rodando dentro do app nativo (Android/iOS)
+const isNative = Capacitor.isNativePlatform();
 
 /**
  * GarcomMobileApp
  *
  * Fluxo completo:
- *  1. Garçom tira foto (câmera ou galeria) via Capacitor
+ *  1. Garçom tira foto (câmera ou galeria) via Capacitor (nativo) ou <input file> (web)
  *  2. Foto é enviada ao Supabase Storage (bucket: fotos-pratos)
  *  3. Dados do prato (nome, descrição, preço, url_foto) salvos na tabela `pratos`
  *  4. Lista de pratos cadastrados é exibida abaixo do formulário
  */
 export default function GarcomMobileApp() {
   // ── Estado do formulário ──
-  const [fotoPrato, setFotoPrato] = useState(null);     // webPath local (preview)
-  const [fotoBlobUrl, setFotoBlobUrl] = useState(null); // blob para upload
+  const [fotoPrato, setFotoPrato] = useState(null);     // URL local (preview)
+  const [fotoBlob, setFotoBlob] = useState(null);       // Blob para upload
   const [nomePrato, setNomePrato] = useState('');
   const [descricao, setDescricao] = useState('');
   const [preco, setPreco] = useState('');
@@ -28,6 +32,9 @@ export default function GarcomMobileApp() {
   // ── Lista de pratos do banco ──
   const [pratos, setPratos] = useState([]);
   const [carregandoLista, setCarregandoLista] = useState(true);
+
+  // ── Ref para o input file oculto (fallback web) ──
+  const inputFileRef = useRef(null);
 
   // ── Busca pratos ao montar o componente ──
   useEffect(() => {
@@ -49,65 +56,70 @@ export default function GarcomMobileApp() {
   };
 
   /**
-   * Verifica/solicita permissões de câmera no Android.
-   */
-  const verificarPermissoes = async () => {
-    try {
-      const permissoes = await Camera.checkPermissions();
-      if (permissoes.camera === 'granted' && permissoes.photos === 'granted') return true;
-
-      const resultado = await Camera.requestPermissions({ permissions: ['camera', 'photos'] });
-      if (resultado.camera === 'granted' || resultado.photos === 'granted') return true;
-
-      setErro('Permissão negada. Habilite a câmera nas configurações do dispositivo.');
-      return false;
-    } catch {
-      return true; // Em ambiente web, segue em frente
-    }
-  };
-
-  /**
-   * Abre câmera/galeria via Capacitor e atualiza preview.
+   * Abre câmera/galeria.
+   * - No Android/iOS: usa Capacitor Camera
+   * - No navegador web: abre <input type="file"> nativo do browser
    */
   const cadastrarFotoPrato = async () => {
     setErro(null);
     setSucesso(null);
-    setCarregando(true);
 
-    try {
-      const temPermissao = await verificarPermissoes();
-      if (!temPermissao) { setCarregando(false); return; }
+    if (isNative) {
+      // ── Fluxo nativo (Android/iOS) ──
+      setCarregando(true);
+      try {
+        const permissoes = await Camera.checkPermissions();
+        if (permissoes.camera !== 'granted' || permissoes.photos !== 'granted') {
+          const resultado = await Camera.requestPermissions({ permissions: ['camera', 'photos'] });
+          if (resultado.camera !== 'granted' && resultado.photos !== 'granted') {
+            setErro('Permissão negada. Habilite a câmera nas configurações do dispositivo.');
+            setCarregando(false);
+            return;
+          }
+        }
 
-      const image = await Camera.getPhoto({
-        quality: 90,
-        allowEditing: true,            // Requisito técnico
-        resultType: CameraResultType.Uri,
-        source: CameraSource.Prompt,   // Requisito técnico
-      });
+        const image = await Camera.getPhoto({
+          quality: 90,
+          allowEditing: true,
+          resultType: CameraResultType.Uri,
+          source: CameraSource.Prompt,
+        });
 
-      if (image?.webPath) {
-        setFotoPrato(image.webPath);
-        setFotoBlobUrl(image.webPath); // Mesmo path; o Capacitor expõe via URL local
+        if (image?.webPath) {
+          setFotoPrato(image.webPath);
+          // Converte webPath em Blob
+          const resp = await fetch(image.webPath);
+          const blob = await resp.blob();
+          setFotoBlob(blob);
+        }
+      } catch (error) {
+        const msg = error?.message || String(error);
+        if (!msg.includes('cancelled') && !msg.includes('canceled') && !msg.includes('dismissed') && !msg.includes('No image picked')) {
+          setErro('Não foi possível acessar a câmera. Tente novamente.');
+        }
+      } finally {
+        setCarregando(false);
       }
-    } catch (error) {
-      const msg = error?.message || String(error);
-      // Tratamento de exceção: cancelamento não trava o app
-      if (msg.includes('cancelled') || msg.includes('canceled') || msg.includes('dismissed') || msg.includes('No image picked')) {
-        console.log('[Camera] Usuário cancelou. App continua normalmente.');
-      } else {
-        setErro('Não foi possível acessar a câmera. Tente novamente.');
-      }
-    } finally {
-      setCarregando(false);
+    } else {
+      // ── Fluxo web (navegador do PC/celular) ──
+      // Dispara o <input type="file"> oculto
+      inputFileRef.current?.click();
     }
   };
 
   /**
-   * Converte webPath do Capacitor em Blob para fazer upload no Supabase Storage.
+   * Callback do <input type="file"> — usado apenas no navegador web.
    */
-  const webPathToBlob = async (webPath) => {
-    const response = await fetch(webPath);
-    return await response.blob();
+  const onFileSelected = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const previewUrl = URL.createObjectURL(file);
+    setFotoPrato(previewUrl);
+    setFotoBlob(file);
+
+    // Limpa o input para permitir selecionar o mesmo arquivo novamente
+    e.target.value = '';
   };
 
   /**
@@ -115,36 +127,34 @@ export default function GarcomMobileApp() {
    */
   const salvarPrato = async () => {
     if (!nomePrato.trim()) { setErro('Informe o nome do prato.'); return; }
-    if (!fotoPrato) { setErro('Tire uma foto do prato antes de salvar.'); return; }
+    if (!fotoBlob) { setErro('Adicione uma foto do prato antes de salvar.'); return; }
 
     setErro(null);
     setSucesso(null);
     setSalvando(true);
 
     try {
-      // 1. Converter webPath em Blob
-      const blob = await webPathToBlob(fotoPrato);
-      const extensao = blob.type.includes('png') ? 'png' : 'jpg';
+      const extensao = fotoBlob.type?.includes('png') ? 'png' : 'jpg';
       const nomeArquivo = `prato_${Date.now()}.${extensao}`;
 
-      // 2. Upload da foto no Supabase Storage (bucket: fotos-pratos)
+      // 1. Upload da foto no Supabase Storage (bucket: fotos-pratos)
       const { error: uploadError } = await supabase.storage
         .from('fotos-pratos')
-        .upload(nomeArquivo, blob, {
-          contentType: blob.type || 'image/jpeg',
+        .upload(nomeArquivo, fotoBlob, {
+          contentType: fotoBlob.type || 'image/jpeg',
           upsert: false,
         });
 
       if (uploadError) throw new Error(`Erro no upload da foto: ${uploadError.message}`);
 
-      // 3. Obter URL pública da foto
+      // 2. Obter URL pública da foto
       const { data: urlData } = supabase.storage
         .from('fotos-pratos')
         .getPublicUrl(nomeArquivo);
 
       const urlFoto = urlData?.publicUrl || null;
 
-      // 4. Inserir prato na tabela `pratos`
+      // 3. Inserir prato na tabela `pratos`
       const { error: insertError } = await supabase
         .from('pratos')
         .insert([{
@@ -156,13 +166,13 @@ export default function GarcomMobileApp() {
 
       if (insertError) throw new Error(`Erro ao salvar prato: ${insertError.message}`);
 
-      // 5. Sucesso — limpa formulário e atualiza lista
+      // 4. Sucesso — limpa formulário e atualiza lista
       setSucesso(`✅ Prato "${nomePrato}" cadastrado com sucesso!`);
       setNomePrato('');
       setDescricao('');
       setPreco('');
       setFotoPrato(null);
-      setFotoBlobUrl(null);
+      setFotoBlob(null);
       await buscarPratos();
 
       setTimeout(() => setSucesso(null), 4000);
@@ -180,7 +190,6 @@ export default function GarcomMobileApp() {
   const excluirPrato = async (prato) => {
     if (!confirm(`Excluir "${prato.nome}"?`)) return;
 
-    // Remove a foto do Storage se houver
     if (prato.url_foto) {
       const nomeArquivo = prato.url_foto.split('/').pop();
       await supabase.storage.from('fotos-pratos').remove([nomeArquivo]);
@@ -192,6 +201,16 @@ export default function GarcomMobileApp() {
 
   return (
     <div className="min-h-screen bg-amber-50 flex flex-col">
+
+      {/* Input file oculto — fallback para navegador web */}
+      <input
+        ref={inputFileRef}
+        type="file"
+        accept="image/*"
+        capture="environment"
+        onChange={onFileSelected}
+        className="hidden"
+      />
 
       {/* ─── Cabeçalho ─── */}
       <header className="bg-amber-900 text-white px-5 py-4 shadow-md">
@@ -265,7 +284,7 @@ export default function GarcomMobileApp() {
                   <img src={fotoPrato} alt="Prato" className="w-full h-52 object-cover" />
                   <div className="absolute inset-0 flex items-end justify-between p-3">
                     <button
-                      onClick={() => { setFotoPrato(null); setFotoBlobUrl(null); }}
+                      onClick={() => { setFotoPrato(null); setFotoBlob(null); }}
                       className="bg-red-600 text-white text-xs font-bold px-3 py-1.5 rounded-lg shadow hover:bg-red-700"
                     >
                       🗑️ Remover
@@ -316,7 +335,7 @@ export default function GarcomMobileApp() {
             {/* Botão salvar no Supabase */}
             <button
               onClick={salvarPrato}
-              disabled={salvando || carregando || !fotoPrato || !nomePrato.trim()}
+              disabled={salvando || carregando || !fotoBlob || !nomePrato.trim()}
               className="w-full bg-green-700 hover:bg-green-800 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed text-white font-bold py-3 px-5 rounded-xl flex items-center justify-center gap-2 transition-all shadow"
             >
               {salvando
